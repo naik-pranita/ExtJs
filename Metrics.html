@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>BasicRallyApp</title>
+    <script type="text/javascript" src="https://rally1.rallydev.com/apps/2.1/sdk-debug.js"></script>
+    <script>
+        Rally.onReady(function () {
+            Ext.define("Metrics", {
+                extend: "Rally.app.App",
+                componentCls: "app",
+                launch: function () {
+                    var iterationCombobox = Ext.create("Rally.ui.combobox.IterationComboBox", {
+                        avoidUnscheduledIteration: true,
+                        itemId: 'IterationComboBox',
+                        allQuery: 'Sprint',
+                        listeners: {
+                            select: function (combobox) {
+                                Ext.getBody().setOpacity(.8);
+                                Ext.getBody().mask('Fetching Data...');
+                                this._fetchData(combobox).then({
+                                    scope: this, success: function (data) {
+                                        this.remove('myPanel');
+                                        this.display(data);
+                                    }
+                                });
+                            },
+                            ready: function (combobox) {
+                                Ext.getBody().setOpacity(.8);
+                                Ext.getBody().mask('Fetching Data...');
+                                this._fetchData(combobox).then({
+                                    scope: this, success: function (data) {
+                                        this.display(data);
+                                    }
+                                });
+                            },
+                            scope: this
+                        }
+                    });
+                    this.add(iterationCombobox);
+                },
+                _fetchData: function (iteration) {
+                    var deferred = Ext.create('Deft.Deferred');
+
+                    Deft.Promise.all([this.fetchCapacity(iteration), this.fetchAcceptance(iteration),
+                    this.fetchBacklog(iteration), this.fetchSayDoRatio(iteration)]).then({
+                        scope: this, success: function (data) {
+                            deferred.resolve(data);
+                        }
+                    });
+                    return deferred.promise;
+
+                },
+                fetchCapacity: function (iteration) {
+                    var deferred = Ext.create('Deft.Deferred'),
+                        capacity = 0,
+                        taskEstimates = 0,
+                        load = 0;
+                    Ext.create('Rally.data.wsapi.Store', {
+                        model: 'UserIterationCapacity',
+                        fetch: true,
+                        autoLoad: true,
+                        context: {
+                            project: this.getContext().getProject()._ref
+                        },
+                        fetch: ['TaskEstimates', 'Iteration', 'Capacity', 'Load', 'User', 'Project', 'sums'],
+                        filters: [{
+                            property: "Iteration.Name",
+                            value: iteration.getRecord().get("Name")
+                        }, {
+                            property: "Project.Name",
+                            value: this.getContext().getProject().Name
+                        }],
+                        listeners: {
+                            load: function (store, records) {
+                                if (!Ext.isEmpty(records)) {
+                                    Ext.Array.each(records, function (record, index) {
+                                        if (record.get('Capacity')) {
+                                            capacity += record.get('Capacity');
+                                        }
+                                        if (record.get('TaskEstimates')) {
+                                            taskEstimates += record.get('TaskEstimates');
+                                        }
+                                        load = (taskEstimates / capacity);
+
+                                        if (index === records.length - 1) {
+                                            deferred.resolve(this.getCapacityChart(load));
+                                        }
+
+                                    }, this);
+
+                                } else {
+
+                                    deferred.resolve({
+                                        height: 250,
+                                        columnWidth: 0.5,
+                                        border: false,
+                                        items: [{
+                                            xtype: 'text',
+                                            text: 'Capacity Not Available',
+                                            margin: '100 75',
+                                            style: {
+                                                fontSize: '15px'
+                                            }
+                                        }]
+                                    });
+                                }
+
+
+                            },
+                            scope: this
+                        }
+                    });
+                    return deferred.promise;
+                },
+                fetchAcceptance: function (iteration) {
+                    var deferred = Ext.create('Deft.Deferred');
+                    Ext.create('Rally.data.wsapi.artifact.Store', {
+                        models: ['UserStory', 'Defect'],
+                        autoLoad: true,
+                        context: {
+                            project: this.getContext().getProject()._ref
+                        },
+                        fetch: ["Name", "ScheduleState", "Project", "PlanEstimate", "FormattedID", "PortfolioItem",
+                            "InvestmentCategory", "Parent", "Feature"],
+                        filters: [{
+                            property: "Iteration",
+                            operator: "=",
+                            value: iteration.getRecord().get("_ref")
+                        }],
+                        sorters: [{
+                            property: 'Project',
+                            direction: 'ASC'
+                        }],
+                        listeners: {
+                            load: function (store, records) {
+                                var totalEstimate = 0,
+                                    totalAccepted = 0,
+                                    expenseEstimate = 0;
+                                if (!Ext.isEmpty(records)) {
+                                    Ext.Array.each(records, function (record, index) {
+                                        if (record.get('Feature') &&
+                                            record.get('Feature').InvestmentCategory == 'Expense Projects') {
+                                            expenseEstimate = expenseEstimate + parseInt(record.get('PlanEstimate'), 10);
+                                        } else if (record.get('Feature') && record.get('Feature').Parent && record.get('Feature').Parent.InvestmentCategory == 'Expense Projects') {
+                                            expenseEstimate = expenseEstimate + parseInt(record.get('PlanEstimate'), 10);
+                                        }
+                                        if (record.get('PlanEstimate')) {
+                                            totalEstimate = totalEstimate + parseInt(record.get('PlanEstimate'), 10);
+                                            if (record.get('ScheduleState') === 'Accepted') {
+                                                totalAccepted = totalAccepted + parseInt(record.get('PlanEstimate'), 10);
+                                            }
+                                        }
+
+                                        if (records.length === index + 1 && totalEstimate) {
+                                            deferred.resolve(this.getAcceptanceChart(totalAccepted, totalEstimate, expenseEstimate));
+                                        }
+                                    }, this);
+                                } else {
+                                    deferred.resolve(this.getAcceptanceChart(totalAccepted, totalEstimate, expenseEstimate));
+                                }
+
+                            },
+                            scope: this
+                        }
+                    });
+
+                    return deferred.promise;
+
+                },
+                fetchBacklog: function (iteration) {
+                    var deferred = Ext.create('Deft.Deferred');
+                    var endDate = Ext.Date.add(iteration.getRecord().get('EndDate'), Ext.Date.DAY, 52)
+                    Ext.create('Rally.data.wsapi.Store', {
+                        model: 'HierarchicalRequirement',
+                        fetch: true,
+                        autoLoad: true,
+                        context: {
+                            project: this.getContext().getProject()._ref
+                        },
+                        listeners: {
+                            load: function (store, records, success) {
+                                var iterationStories = [];
+                                IterationPlannedVelocity = [],
+                                    iterationNames = [], colors = [];
+                                var idx = 0, breakIdx = 0;
+                                this.getAverageVelocity(iteration).then({
+                                    scope: this,
+                                    success: function (avgVelocity) {
+                                        Ext.Array.each(records, function (record, index) {
+                                            if (record.get('ScheduleState') && record.get('ScheduleState') !== 'Not Groomed'
+                                                && record.get('PlanEstimate')) {
+                                                IterationPlannedVelocity.push(record.get('PlanEstimate'));
+                                                idx++;
+                                            }
+                                            if (typeof records[index + 1] === 'undefined'
+                                                || record.get('Iteration').Name !== records[index + 1].get('Iteration').Name) {
+
+                                                iterationNames.push(record.get('Iteration').Name);
+                                                var sum = Ext.Array.sum(Ext.Array.slice(IterationPlannedVelocity, breakIdx, IterationPlannedVelocity.length));
+                                                if (sum >= avgVelocity) {
+                                                    colors.push('#5CBA49');
+                                                } else {
+                                                    colors.push('#b81b10');
+                                                }
+                                                iterationStories.push(sum);
+                                                breakIdx = idx;
+                                            }
+                                            if (records.length - 1 === index) {
+                                                deferred.resolve(
+                                                    this.getBacklogChart(avgVelocity, iterationStories, iterationNames, colors)
+                                                );
+                                            }
+                                        }, this);
+                                    }
+                                });
+                            },
+                            scope: this
+                        },
+                        fetch: ['Name', 'FormattedID', 'Iteration', 'ScheduleState', 'PlanEstimate', 'PlannedVelocity'],
+                        filters: [{
+                            property: 'Iteration.Name',
+                            operator: 'contains',
+                            value: 'Sprint'
+                        }, {
+                            property: 'Iteration.EndDate',
+                            operator: '<=',
+                            value: endDate
+                        },
+                        {
+                            property: 'Iteration.StartDate',
+                            operator: '>=',
+                            value: iteration.getRecord().get('StartDate')
+                        }],
+                        sorters: [{
+                            property: 'Iteration.EndDate',
+                            direction: 'ASC'
+                        }]
+                    });
+
+                    return deferred.promise;
+                },
+                fetchSayDoRatio: function (iteration) {
+                    var defer = Ext.create('Deft.Deferred');
+
+                    Deft.Promise.all([this.getHistoricData(iteration.getRecord().get('StartDate'), iteration.getRecord().get('EndDate'),
+                        iteration.getRecord().get('ObjectID')), this.getPresentData(iteration.getRecord().get("_ref"))]).then({
+                            scope: this,
+                            success: function (result) {
+                                if (result[0]) {
+                                    defer.resolve(this.getSayDoChart(result));
+                                } else {
+                                    defer.resolve({
+                                        height: 250,
+                                        columnWidth: 0.5,
+                                        border: false,
+                                        items: [{
+                                            xtype: 'text',
+                                            text: 'Say Do Ratio Not Available',
+                                            margin: '100 75',
+                                            style: {
+                                                fontSize: '15px'
+                                            }
+                                        }]
+                                    });
+                                }
+
+                            }
+                        });
+
+                    return defer.promise;
+                },
+                getSayDoChart: function (records) {
+                    var prev = records[0], current = records[1], prevSum = 0, currentSum = 0, totalDelivered = 0, prevCount = 0, currentCount = 0;
+
+                    for (var prop in prev) {
+                        prevSum = prevSum + prev[prop].EstimatePrev;
+                        prevCount++;
+
+                    }
+
+                    for (var property in current) {
+                        totalDelivered = totalDelivered + current[property].EstimateCurrent;
+                        if (current.hasOwnProperty(property) && prev.hasOwnProperty(property)) {
+                            currentSum = currentSum + current[property].EstimateCurrent;
+                            current[property].PresentAtStart = 'Yes';
+                            currentCount++;
+                        }
+                    }
+
+                    console.log(prevSum, currentSum);
+                    console.log(prevCount, currentCount);
+
+                    var sayDoRatioByPoints = Math.ceil(currentSum * 100 / prevSum, 2) || 0;
+                    var sayDoRatioByCount = Math.ceil(currentCount * 100 / prevCount, 2) || 0;
+                    var dataforPoints = [
+                        {
+                            name: 'SayDo',
+                            y: sayDoRatioByPoints,
+                            color: '#156D82'
+                        },
+                        {
+                            name: 'Remaining',
+                            y: 100 - sayDoRatioByPoints,
+                            color: '#e7e7e7'
+                        }
+                    ];
+
+                      var dataForCount = [
+                        {
+                            name: 'SayDo',
+                            y: sayDoRatioByCount,
+                            color: '#156D82'
+                        },
+                        {
+                            name: 'Remaining',
+                            y: 100 - sayDoRatioByCount,
+                            color: '#e7e7e7'
+                        }
+                    ];
+
+                    var chart = {
+                        height: 250,
+                        columnWidth: 0.5,
+                        border: false,
+                        items: [{
+                            xtype: 'rallychart',
+                            height: 300,
+                            border: false,
+                            layout: 'vbox',
+                            chartData: {
+                                series: [{
+                                    name: 'Percentage',
+                                    data:dataforPoints,
+                                    size: '100%',
+                                    innerSize: '100%',
+                                    dataLabels: { enabled: false }
+
+                                }]
+                            },
+                            chartConfig: {
+                                chart: {
+                                    type: "pie"
+                                },
+                                plotOptions: {
+                                    pie: {
+                                        center: ['25%', '10%']
+                                    }
+                                },
+                                title: {
+                                    text: 'Say Do Ratio' + '<br>' + sayDoRatioByPoints + ' %',
+                                    align: 'center',
+                                    x: -135, y: 100,
+                                    style: { fontSize: '20px' }
+
+                                }
+
+                            }
+                        }]
+                    };
+
+                    var sayDoChart = {
+                        height: 500,
+                        columnWidth: 0.5,
+                        border: false,
+                        items: [{
+                            xtype: 'combo',
+                            layout: 'vbox',
+                            editable: false,
+                            store: Ext.create('Ext.data.Store', {
+                                fields: ['abbr', 'name'],
+                                data: [{ abbr: 'byPoints', name: 'By points' },
+                                { abbr: 'byCount', name: 'By count' }]
+                            }),
+                            displayField: 'name',
+                            valueField: 'abbr',
+                            listeners: {
+                                scope: this,
+                                change: function (event, newVal, oldVal) {
+                                    var panel = this.getComponent('sayDoPanel');
+                                    switch (newVal) {
+                                        case 'byPoints': this.getComponent('byCount').setVisible(false); panel.getComponent('byPoints').setVisible(true); break;
+                                        case 'byCount': this.getComponent('byPoints').setVisible(false); panel.getComponent('byCount').setVisible(true); break;
+                                    }
+
+                                }
+                            }
+                        },
+                        {
+                            xtype: 'rallychart',
+                            height: 300,
+                            border: false,
+                            layout: 'vbox',
+                            itemId: 'byPoints',
+                            // hidden: true,
+                            chartData: {
+                                series: [{
+                                    name: 'Percentage',
+                                    data: dataforPoints,
+                                    size: '100%',
+                                    innerSize: '100%',
+                                    dataLabels: { enabled: false }
+
+                                }]
+                            },
+                            chartConfig: {
+                                chart: {
+                                    type: "pie"
+                                },
+                                plotOptions: {
+                                    pie: {
+                                        center: ['25%', '10%']
+                                    }
+                                },
+                                title: {
+                                    text: 'Say Do Ratio' + '<br>' + sayDoRatioByPoints + ' %',
+                                    align: 'center',
+                                    x: -135, y: 100,
+                                    style: { fontSize: '20px' }
+
+                                }
+
+                            }
+                        },
+                        {
+                            xtype: 'rallychart',
+                            height: 300,
+                            border: false,
+                            layout: 'vbox',
+                            // hidden: true,
+                            itemId: 'byCount',
+                            chartData: {
+                                series: [{
+                                    name: 'Percentage',
+                                    data: dataForCount,
+                                    size: '100%',
+                                    innerSize: '100%',
+                                    dataLabels: { enabled: false }
+
+                                }]
+                            },
+                            chartConfig: {
+                                chart: {
+                                    type: "pie"
+                                },
+                                plotOptions: {
+                                    pie: {
+                                        center: ['25%', '10%']
+                                    }
+                                },
+                                title: {
+                                    text: 'Say Do Ratio' + '<br>' + sayDoRatioByCount + ' %',
+                                    align: 'center',
+                                    x: -135, y: 100,
+                                    style: { fontSize: '20px' }
+
+                                }
+
+                            }
+                        }]
+                    };
+
+                    var sayDoPanel = Ext.create('Ext.form.Panel', {
+                        itemId: 'sayDoPanel',
+                        title: 'Metrics',
+                        layout: 'column',
+                        border: false,
+                        items: sayDoChart
+                    });
+
+                    this.add(sayDoPanel);
+
+                    return chart;
+                },
+                getHistoricData: function (startDate, endDate, ObjectID) {
+                    var deferred = Ext.create('Deft.Deferred');
+                    var today = new Date();
+                    if (new Date(startDate) <= today) {
+                        var start = new Date(startDate.setHours(23, 59, 59));
+                        start = Ext.util.Format.date(start, 'Y-m-d');
+                        var end = Ext.util.Format.date(endDate, 'Y-m-d');
+
+                        var snapshotStore = Ext.create('Rally.data.lookback.SnapshotStore', {
+                            fetch: ['ScheduleState', 'Name', 'PlanEstimate', 'Project', '_TypeHierarchy', 'Iteration',
+                                '_PreviousValues', 'FormattedID'],
+                            autoLoad: true,
+                            context: {
+                                workspace: this.getContext().getWorkspaceRef()
+                            },
+                            hydrate: ["_PreviousValues", "ScheduleState", "Project"],
+                            findConfig: {
+                                "Project": this.getContext().getProject().ObjectID,
+                                "_TypeHierarchy": {
+                                    $in: ["Defect", "HierarchicalRequirement"]
+                                },
+                                "Children": null,
+                                "Iteration": ObjectID,
+                                "__At": Rally.util.DateTime.toIsoString(Ext.Date.add(startDate, Ext.Date.DAY, 1)),
+                                _ValidFrom: {
+                                    $gte: start,
+                                    $lt: end
+                                }
+                            }
+                        });
+
+                        snapshotStore.load({
+                            scope: this,
+                            callback: function (records, operation, success) {
+                                if (success) {
+                                    var previous = {};
+                                    records.map(function (record, index) {
+                                        if (!isNaN(record.get('PlanEstimate'))) {
+                                            previous[record.get('FormattedID')] = {
+                                                EstimatePrev: record.get('PlanEstimate'),
+                                                Name: record.get('Name'),
+                                                StoryId: record.get('FormattedID'),
+                                                PresentAtStart: 'Yes',
+                                                DeliveredAtEnd: 'No'
+                                            };
+
+                                            if (index === records.length - 1) {
+                                                deferred.resolve(previous);
+                                            }
+                                        }
+
+                                    });
+                                } else {
+                                    deferred.reject("Error loading start of iteration data");
+                                }
+                            }
+                        });
+                    } else {
+                        deferred.resolve(null);
+                    }
+                    return deferred.promise;
+                },
+                getPresentData: function (iteration) {
+                    var deferred = Ext.create('Deft.Deferred');
+
+                    var currentStore = Ext.create('Rally.data.wsapi.artifact.Store', {
+                        models: ['UserStory', 'Defect'],
+                        fetch: true,
+                        autoLoad: true,
+                        context: {
+                            project: this.getContext().getProject()._ref,
+                            projectScopeDown: !0
+                        },
+                        fetch: ["Name", "PlanEstimate", "Project", "ScheduleState", "Tags", "FormattedID"],
+                        filters: [{
+                            property: "iteration",
+                            operator: "=",
+                            value: iteration
+                        }],
+                        sorters: [{
+                            property: 'Project',
+                            direction: 'ASC'
+                        }]
+                    });
+
+                    currentStore.load({
+                        scope: this,
+                        callback: function (records, operation, success) {
+                            if (success) {
+                                var current = {};
+                                var i = 0
+                                records.map(function (record, index) {
+                                    if (record.get('ScheduleState') === 'Accepted' && !isNaN(record.get('PlanEstimate'))) {
+                                        current[record.get('FormattedID')] = {
+                                            EstimateCurrent: record.get('PlanEstimate'),
+                                            Name: record.get('Name'),
+                                            StoryId: record.get('FormattedID'),
+                                            PresentAtStart: 'No',
+                                            DeliveredAtEnd: 'Yes'
+                                        };
+                                        i = index;
+                                    }
+                                    if (index === records.length - 1) {
+                                        deferred.resolve(current);
+                                    }
+                                });
+
+                            } else {
+                                deferred.reject("Error loading data for today.");
+                            }
+                        }
+                    });
+
+                    return deferred.promise;
+                },
+                getAverageVelocity: function (it) {
+                    var defer = Ext.create('Deft.Deferred');
+                    var StartDate = Ext.Date.format(new Date(Ext.Date.subtract(it.getRecord().get('StartDate'), Ext.Date.DAY, 70)), 'Y-m-d\\TH:i:s.u\\Z');
+                    var EndDate = Ext.Date.format(new Date(it.getRecord().get('StartDate')), 'Y-m-d\\TH:i:s.u\\Z');
+                    var fetch = 'fetch=sum:[InProgressAmount,CompletedAmount,AcceptedAmount,ActualPlannedAmount,IterationPlannedVelocity]&';
+                    var query = 'query=((StartDate >= ' + StartDate + ') AND(EndDate <= ' + EndDate + '))&';
+                    Ext.Ajax.request({
+                        url: 'https://rally1.rallydev.com/slm/webservice/v2.x/iterationstatus?compact=true&pagesize=1&projectScopeUp=false&'
+                        + fetch + query + '&project=' + this.getContext().getProject()._ref,
+                        success: function (data) {
+                            defer.resolve(Ext.JSON.decode(data.responseText).QueryResult.Sums.AcceptedAmount / 5);
+                        }
+                    });
+
+                    return defer.promise;
+                },
+                getCapacityChart: function (load) {
+                    var loaded = Math.ceil(100 * load) || 0;
+                    var data, title;
+
+                    if (load > 1) {
+                        loaded = Math.ceil((load - 1) * 100);
+                        title = 'Capacity: ' + (100 + loaded) + '%'
+                        data = [
+                            {
+                                name: 'Load',
+                                y: loaded,
+                                color: '#ec0000'
+                            },
+                            {
+                                name: 'Remaining',
+                                y: 100 - loaded,
+                                color: '#5CBA49'
+                            }
+                        ]
+                    } else {
+                        title = 'Capacity: ' + loaded + '%'
+                        data = [
+                            {
+                                name: 'Load',
+                                y: loaded,
+                                color: '#5CBA49'
+                            },
+                            {
+                                name: 'Remaining',
+                                y: 100 - loaded,
+                                color: '#e7e7e7'
+                            }
+                        ]
+                    }
+
+                    var chart = {
+                        height: 350,
+                        columnWidth: 0.33,
+                        border: false,
+                        items: [{
+                            xtype: 'rallychart',
+                            height: 275,
+                            border: false,
+                            layout: 'vbox',
+                            chartData: {
+                                series: [{
+                                    name: 'Percentage',
+                                    data: data,
+                                    size: '100%',
+                                    innerSize: '100%',
+                                    dataLabels: { enabled: false }
+
+                                }]
+                            },
+                            chartConfig: {
+                                chart: {
+                                    type: "pie"
+                                },
+                                plotOptions: {
+                                    pie: {
+                                        center: ['25%', '25%']
+                                    }
+                                },
+                                title: {
+                                    text: title,
+                                    align: 'center',
+                                    x: -135, y: 110,
+                                    style: { fontSize: '20px' }
+
+                                }
+                            }
+                        }]
+                    };
+
+                    if (load == 'Infinity') {
+                        return {
+                            height: 350,
+                            columnWidth: 0.33,
+                            border: false,
+                            items: [{
+                                xtype: 'text',
+                                text: 'Capacity Not Available',
+                                margin: '100 75',
+                                style: {
+                                    fontSize: '15px'
+                                }
+                            }]
+                        };
+                    }
+
+                    return chart;
+                },
+                getAcceptanceChart: function (totalAccepted, totalEstimate, expenseEstimate) {
+                    var acceptance = Math.ceil(100 * (totalAccepted / totalEstimate)) || 0;
+
+                    var data = [
+                        {
+                            name: 'Acceptance',
+                            y: acceptance,
+                            color: '#156D82'
+                        },
+                        {
+                            name: 'Remaining',
+                            y: 100 - acceptance,
+                            color: '#e7e7e7'
+                        }
+                    ];
+
+                    var expenseChart = {
+                        xtype: 'rallychart',
+                        height: 300,
+                        width: 150,
+                        columnWidth: 0.5,
+                        itemId: 'expense',
+                        chartConfig: {
+                            chart: {
+                                type: 'column'
+                            },
+                            title: {
+                                text: 'Expense Ratio',
+                                align: 'center'
+                            },
+                            xField: 'Expenses',
+                            xAxis: [{
+                                categories: ['Investment Category'],
+                                title: {
+                                    text: "Team " + this.getContext().getProject().Name + ' Expense Ratio'
+                                }
+                            }],
+                            yAxis: {
+                                title: {
+                                    text: 'Points'
+                                }
+                            },
+                            plotOptions: {
+                                column: {
+                                    stacking: 'normal',
+                                    pointWidth: 50
+                                },
+                                series: {
+                                    animation: {
+                                        duration: 2000,
+                                        easing: 'swing'
+                                    }
+                                }
+                            }
+                        },
+                        chartData: {
+                            series: [{
+                                name: 'Expense Projects',
+                                data: [expenseEstimate],
+                                stack: 'Points',
+                                color: '#b81b10'
+                            }, {
+                                name: 'Cap dev',
+                                data: [totalEstimate - expenseEstimate],
+                                stack: 'Points',
+                                color: '#156D82'
+                            }
+                            ]
+                        }
+                    };
+                    var acceptChart = {
+                        xtype: 'rallychart',
+                        height: 330,
+                        border: false,
+                        columnWidth: 0.5,
+                        layout: 'vbox',
+                        chartData: {
+                            series: [{
+                                name: 'Percentage',
+                                data: data,
+                                size: '100%',
+                                innerSize: '100%',
+                                dataLabels: { enabled: false }
+
+                            }]
+                        },
+                        chartConfig: {
+                            chart: {
+                                type: "pie"
+                            },
+                            plotOptions: {
+                                pie: {
+                                    center: ['25%', '-2%']
+                                }
+                            },
+                            title: {
+                                text: 'Acceptance' + '<br>' + acceptance + ' %',
+                                align: 'center',
+                                x: -135, y: 110,
+                                style: { fontSize: '20px'/*, color: '#5CBA49'*/ }
+
+                            },
+                            subtitle: {
+                                text: totalAccepted + ' of ' + totalEstimate + ' points',
+                                x: -135, y: 235,
+                                align: 'center',
+                                style: { fontSize: '16px' }
+                            }
+
+                        }
+                    };
+
+                    var chart = {
+                        height: 350,
+                        columnWidth: 0.67,
+                        border: false,
+                        layout: 'column',
+                        items: [acceptChart, expenseChart]
+                    };
+
+                    return chart;
+
+                },
+                getBacklogChart: function (avgVelocity, iterationStories, iterationNames, colors) {
+                    return {
+                        height: 250,
+                        columnWidth: 0.5,
+                        border: false,
+                        items: [
+                            {
+                                xtype: 'rallychart',
+                                height: 300,
+                                width: 500,
+                                itemId: 'backlog',
+                                chartConfig: {
+                                    chart: {},
+                                    title: {
+                                        text: 'Backlog Strength: ' + Ext.util.Format.round(Ext.Array.sum(iterationStories) / avgVelocity, 2),
+                                        align: 'center'
+                                    },
+                                    xField: 'Iteration',
+                                    xAxis: [{
+                                        categories: iterationNames,
+                                        title: {
+                                            text: "Team " + this.getContext().getProject().Name
+                                        }
+                                    }],
+                                    yAxis: {
+                                        title: {
+                                            text: 'Points'
+                                        }
+                                    },
+                                    plotOptions: {
+                                        column: {
+                                            colorByPoint: true,
+                                            colors: colors,
+                                            width: 50
+                                        },
+                                        series: {
+                                            animation: {
+                                                duration: 2000,
+                                                easing: 'swing'
+                                            }
+                                        }
+                                    }
+                                },
+                                chartData: {
+                                    series: [{
+                                        type: 'column',
+                                        name: 'Total Groomed',
+                                        data: iterationStories
+                                    }, {
+                                        type: 'line',
+                                        name: 'Average Velocity',
+                                        data: [avgVelocity, avgVelocity, avgVelocity, avgVelocity]
+                                    }]
+                                }
+                            }
+                        ]
+                    }
+                },
+                display: function (items) {
+                    var panel = Ext.create('Ext.panel.Panel', {
+                        itemId: 'myPanel',
+                        title: 'Metrics',
+                        layout: 'column',
+                        border: false,
+                        items: items
+                    });
+                    Ext.getBody().setOpacity(1);
+                    Ext.getBody().unmask();
+                    this.add(panel);
+                }
+
+            });
+            Rally.launchApp('Metrics', {
+                name: "Metrics",
+                parentRepos: ""
+            });
+        });
+    </script>
+
+</head>
+
+<body>
+</body>
+
+</html>

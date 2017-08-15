@@ -1,0 +1,294 @@
+        -<!DOCTYPE html>
+        <html>
+        <head>
+            <title>PVT Dashboard</title>
+        <script type="text/javascript" src="https://rally1.rallydev.com/apps/2.1/sdk-debug.js"></script>
+        <script type="text/javascript">
+            var pvtTags;
+                Rally.onReady(function() {
+                    Ext.define("PVTDashboard", {
+                        itemId: 'sayDoApp',
+                        extend: "Rally.app.App",
+                        componentCls: "app",
+                        launch: function() {
+                            var _this = this;
+                            var iterationCombobox = Ext.create("Rally.ui.combobox.IterationComboBox", {
+                                avoidUnscheduledIteration: !0,
+                                itemId: 'IterationComboBox',
+                                allQuery: 'Sprint',
+                                listeners: {
+                                    select: function(combobox) {
+                                        this.remove('sayDoPanel');
+                                        // Ext.getBody().mask('Fetching Data...', 'x-mask-loading');
+                                        Deft.Promise.all(_this._filterStories(combobox)).then({scope: this, success : this.display});
+                                    },
+                                    ready: function(combobox) {
+                                        // Ext.getBody().mask('Fetching Data...', 'x-mask-loading');
+                                        Deft.Promise.all(_this._filterStories(combobox)).then({scope: this, success : this.display});
+                                        
+                                    },
+                                    scope: this
+                                }
+                            });
+                            
+                            this.add(iterationCombobox);
+                        },
+                        display: function(records) {
+                            var prev = records[0];
+                            var current = records[1];
+                            var prevSum = 0;
+                            var currentSum = 0;
+                            var totalDelivered = 0;
+                            var allStories = [];
+
+
+                            Object.assign(allStories, prev, current);
+                            
+                            for(var prop in prev) {
+                                prevSum = prevSum + prev[prop].EstimatePrev;
+                                
+                            }
+
+                        for (var property in current) {
+                            totalDelivered = totalDelivered + current[property].EstimateCurrent;
+                                if (current.hasOwnProperty(property) && prev.hasOwnProperty(property)) {
+                                    currentSum = currentSum + current[property].EstimateCurrent;
+                                    current[property].PresentAtStart = 'Yes';
+                                }
+                        }
+
+                            for(var index in allStories) {
+                                var obj = allStories[index];
+                                if(obj && prev[index] && obj !== prev[index])
+
+                                for(var prop in prev[index]){
+                                    if(!obj[prop]) 
+                                        obj[prop] = prev[index][prop];
+                                    }
+                            }
+
+                            Ext.create('Ext.data.Store', {
+                                storeId:'currentStore',
+                                fields:['StoryId', 'Name', 'EstimatePrev' , 'EstimateCurrent' , 'PresentAtStart', 'DeliveredAtEnd'],
+                                data: Object.keys(allStories).map(function(e) {
+                                            return allStories[e];
+                                        })
+                            });
+
+
+
+                            // Ext.getBody().unmask();
+                            this.add(Ext.create('Ext.grid.Panel', {
+                                itemId: 'sayDoPanel',
+                                title: 'Say Do Ratio : - ' + Ext.util.Format.round(currentSum*100/prevSum, 2) + '%',
+                                store: Ext.data.StoreManager.lookup('currentStore'),
+                                columns: [
+                                    { text: 'User Story',  dataIndex: 'StoryId' },
+                                    { text: 'Name', dataIndex: 'Name', flex: 1 },
+                                    {   
+                                        text: 'Plan Estimate', 
+                                        columns: [{
+                                            text     : 'Estimate at Start',
+                                            width: 100,
+                                            dataIndex: 'EstimatePrev'
+                                        }, {
+                                            text     : 'Estimate at End',
+                                            width: 100,
+                                            dataIndex: 'EstimateCurrent'
+                                        }]
+                                    },
+                                    { 
+                                        text: 'Commited v/s Delivery',
+                                        columns: [{
+                                            text     : 'Present At Start',
+                                            width: 100,
+                                            dataIndex: 'PresentAtStart'
+                                        }, {
+                                            text     : 'Delivered At End',
+                                            width: 100,
+                                            dataIndex: 'DeliveredAtEnd'
+                                        }]
+        }
+                                    
+                                ]
+                            }));
+
+                        },
+                        _filterStories: function(combobox) {
+                            var stories = [];
+                            var _this =this;
+                                
+                            var ObjectID = combobox.getRecord().get("ObjectID");
+                            var iteration = combobox.getRecord().get("_ref");
+                            var defer = Ext.create('Deft.Deferred');
+
+                            var iterationStore =  Ext.create('Rally.data.wsapi.Store', {
+                                    model: 'iteration',
+                                    autoLoad: true,
+                                    filters: [{
+                                        property: 'ObjectID',
+                                        operator: '=',
+                                        value: ObjectID
+                                    }],
+                                    fetch: ['Name', 'EndDate', 'StartDate']
+                                });
+
+                                iterationStore.load({
+                                    scope: this,
+                                    callback: function(data, operation, success) {
+                                        if(success) {
+                                            Deft.Promise.all([_this.getHistoricData(data[0].get('StartDate'), data[0].get('EndDate'), ObjectID),
+                                            _this._getPresentData(iteration)]).then({
+                                                scope: this,
+                                                success: function(result){
+                                                   
+                                                        defer.resolve(result);
+                                                    }
+                                                });
+                                        } else {
+                                            // Ext.getBody().unmask();
+                                            defer.reject("Error fetching iteration data");
+                                        }
+                                    }
+                                });
+                                return defer.promise;
+        
+                        },
+                        _getTotalPoints: function() {
+
+                        },
+                        getHistoricData : function(startDate, endDate, ObjectID) {
+                            var deferred;
+                                deferred = Ext.create('Deft.Deferred');
+
+                            var start = new Date(startDate.setHours(23,59,59));
+                                    start = Ext.util.Format.date(start, 'Y-m-d');
+                            var end = Ext.util.Format.date(endDate, 'Y-m-d');
+
+                            var snapshotStore = Ext.create('Rally.data.lookback.SnapshotStore', {
+                                            fetch: ['ScheduleState', 'Name', 'PlanEstimate', 'Project', '_TypeHierarchy', 'Iteration',
+                                                        '_PreviousValues', 'FormattedID'],
+                                            autoLoad: true,
+                                            context: {
+                                                workspace: this.getContext().getWorkspaceRef()
+                                            },
+                                            hydrate: ["_PreviousValues","ScheduleState", "Project"],
+                                            findConfig:{
+                                                    "Project": this.getContext().getProject().ObjectID,
+                                                    "_TypeHierarchy": {
+                                                        $in: ["Defect","HierarchicalRequirement"]
+                                                        },
+                                                    "Children": null,
+                                                    "Iteration": ObjectID,
+                                                    "__At" : Rally.util.DateTime.toIsoString(Ext.Date.add(startDate, Ext.Date.DAY, 1)),
+                                                    _ValidFrom: {
+                                                        $gte: start,
+                                                        $lt: end
+                                                    }
+                                                }
+                                        });
+
+                                        snapshotStore.load({
+                                            scope: this,
+                                            callback: function(records, operation, success) {
+                                            if (success) {
+                                                var previous = {};
+                                                 
+                                                records.map(function(record, index){
+                                                    if(record.get('PlanEstimate')) {
+                                                        previous[record.get('FormattedID')] = { 
+                                                                        EstimatePrev :  record.get('PlanEstimate'),
+                                                                        Name: record.get('Name'),
+                                                                        StoryId: record.get('FormattedID'),
+                                                                        PresentAtStart: 'Yes',
+                                                                        DeliveredAtEnd: 'No'
+                                                                    };
+                                                        if(index === records.length -1) {
+                                                            deferred.resolve(previous);
+                                                        }
+                                                    }
+                                                    
+                                                });
+                                            } else {
+                                                // Ext.getBody().unmask();
+                                                deferred.reject("Error loading start of iteration data");
+                                            }
+                                            }
+                                        });
+
+                                        return deferred.promise;
+                        },
+
+                        _getPresentData: function(iteration) {
+                            var _this = this;
+                            var deferred;
+                            deferred = Ext.create('Deft.Deferred');
+
+                            var currentStore = Ext.create('Rally.data.wsapi.artifact.Store', {
+                                                models: ['UserStory', 'Defect'],
+                                                fetch: true,
+                                                autoLoad: true,
+                                                context: {
+                                                    project: this.getContext().getProject()._ref,
+                                                    projectScopeDown: !0
+                                                },
+                                                fetch: ["Name", "PlanEstimate", "Project", "ScheduleState", "Tags", "FormattedID"],
+                                                filters: [{
+                                                    property: "iteration",
+                                                    operator: "=",
+                                                    value: iteration
+                                                }],
+                                                sorters: [{
+                                                    property: 'Project',
+                                                    direction: 'ASC'
+                                                }]
+                                            });
+
+                                            currentStore.load({
+                                                scope: this,
+                                                callback: function(records, operation, success) {
+                                                    if (success) {
+                                                        var current = {};
+                                                        var i = 0
+                                                        records.map(function(record, index){
+                                                            if(record.get('ScheduleState') === 'Accepted' && record.get('PlanEstimate')) {
+                                                                current[record.get('FormattedID')] = { 
+                                                                        EstimateCurrent :  record.get('PlanEstimate'),
+                                                                        Name: record.get('Name'),
+                                                                        StoryId: record.get('FormattedID'),
+                                                                        PresentAtStart: 'No',
+                                                                        DeliveredAtEnd: 'Yes'
+                                                                    };
+                                                                    i =index;
+                                                            }
+                                                            if(index === records.length -1) {
+                                                                deferred.resolve(current);
+                                                            } 
+                                                        });
+                                                        
+                                                    } else {
+                                                        // Ext.getBody().unmask();
+                                                        deferred.reject("Error loading data for today.");
+                                                    }
+                                                }
+                                        });
+
+                                        return deferred.promise;
+
+                                            
+                            
+                        },
+                        _displayPanel: function(stories, teamName) {
+                            
+                        }
+                    });
+
+                    Rally.launchApp('PVTDashboard', {
+                        name: "PVT Dashboard"
+                    });
+        });
+            </script>
+        </head>
+        <body>
+        </body>
+        </html>

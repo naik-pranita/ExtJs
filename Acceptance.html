@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PVT Dashboard</title>
+    <script type="text/javascript" src="https://rally1.rallydev.com/apps/2.1/sdk-debug.js"></script>
+    <script type="text/javascript">
+        Rally.onReady(function () {
+            Ext.define("AcceptanceDashboard", {
+                extend: "Rally.app.App",
+                componentCls: "app",
+                launch: function () {
+                    var iterationCombobox = Ext.create("Rally.ui.combobox.IterationComboBox", {
+                        avoidUnscheduledIteration: !0,
+                        itemId: 'IterationComboBox',
+                        allQuery: 'Sprint',
+                        listeners: {
+                            select: function (combobox) {
+                                this.remove('chartPanel');
+                                this._filterStories(combobox).then({
+                                    scope: this, success: function (data) {
+                                        Deft.Promise.all(data).then({scope: this, success: this.display});
+                                    }
+                                });
+                            },
+                            ready: function (combobox) {
+                                this._filterStories(combobox).then({
+                                    scope: this, success: function (data) {
+                                        Deft.Promise.all(data).then({scope: this, success: this.display});
+                                    }
+                                });
+                            },
+                            scope: this
+                        }
+                    });
+                    this.add(iterationCombobox);
+                },
+                display: function (items) {
+                    var panel = Ext.create('Ext.panel.Panel', {
+                        itemId: 'chartPanel',
+                        title: 'Acceptance',
+                        layout: 'column',
+                        border: false,
+                        items: items
+                    });
+                    this.add(panel);
+                },
+                _filterStories: function (combobox) {
+                    var iterationRef = combobox.getRecord().get("_ref");
+                    var deferred = Ext.create('Deft.Deferred');
+                    var store = Ext.create('Rally.data.wsapi.artifact.Store', {
+                        models: ['UserStory', 'Defect'],
+                        autoLoad: true,
+                        context: {
+                            project: this.getContext().getProject()._ref,
+                            projectScopeDown: !0
+                        },
+                        fetch: ["Name", "ScheduleState", "Project", "PlanEstimate", "FormattedID"],
+                        filters: [{
+                            property: "Iteration",
+                            operator: "=",
+                            value: iterationRef
+                        }],
+                        sorters: [{
+                            property: 'Project',
+                            direction: 'ASC'
+                        }]
+                    });
+
+                    store.load({
+                        scope: this,
+                        callback: function (stories, operation, success) {
+                            if (success) {
+                                var index = 0;
+                                var chartData = [];
+                                Ext.Array.each(stories, function (story, idx) {
+                                    if (typeof stories[idx + 1] === 'undefined' ||
+                                        story.get('Project').Name !== stories[idx + 1].get('Project').Name) {
+                                        chartData.push(this._prepareDataForDisplay(stories.slice(index, idx + 1),
+                                            story.get('Project').Name));
+                                        index = idx + 1;
+                                        if (stories.length === idx + 1) {
+                                            deferred.resolve(chartData);
+                                        }
+                                    }
+                                }, this);
+                            } else {
+                                deferred.reject('Error!!');
+                            }
+                        }
+                    });
+                    return deferred.promise;
+                },
+                _prepareDataForDisplay: function (storyRecords, teamName) {
+                    var totalEstimate = 0,
+                        totalAccepted = 0,
+                        acceptance = 0;
+                    var deferred = Ext.create('Deft.Deferred');
+                    Ext.Array.each(storyRecords, function (record, index) {
+                        if (record.get('PlanEstimate')) {
+                            totalEstimate = totalEstimate + parseInt(record.get('PlanEstimate'), 10);
+                            if (record.get('ScheduleState') === 'Accepted') {
+                                totalAccepted = totalAccepted + parseInt(record.get('PlanEstimate'), 10);
+                            }
+                        }
+
+                        if (!isNaN(totalEstimate) && totalEstimate) {
+                            // acceptance = Math.ceil(100 * (totalAccepted / totalEstimate));
+                        }
+                        if (storyRecords.length === index + 1 && totalEstimate) {
+                            deferred.resolve(this._getChartConfig(Math.ceil(100 * (totalAccepted / totalEstimate)), teamName,totalAccepted, totalEstimate));
+                        }
+                    }, this);
+
+                    return deferred.promise;
+                },
+                _getChartConfig: function (acceptance, teamName, totalAccepted, totalEstimate) {
+                    var data = [
+                        {
+                            name: 'Acceptance',
+                            y: acceptance,
+                            color: '#00a1e4'
+                        },
+                        {
+                            name: 'Remaining',
+                            y: 100 - acceptance,
+                            color: '#e7e7e7'
+                        }
+                    ];
+
+                    var chart = {
+                        height: 250,
+                        columnWidth: 0.33,
+                        border: false,
+                        items: [{
+                            xtype: 'rallychart',
+                            height: 350,
+                            border: false,
+                            layout: 'vbox',
+                            chartData: {
+                                series: [{
+                                    name: 'Percentage',
+                                    data: data,
+                                    size: '100%',
+                                    innerSize: '99%',
+                                    dataLabels: { enabled: false }
+                                   
+                                }]
+                            },
+                            chartConfig: {
+                                chart: {
+                                    type: "pie"
+                                },
+                                plotOptions: {
+                                    pie: {
+                                        center: ['25%','-15%']
+                                    }
+                                },
+                                title: {
+                                    text: teamName + '<br>' + acceptance + ' %',
+                                    align: 'center',
+                                    x:-135, y: 115,
+                                    style: {fontSize: '30px'/*, color: '#8dc63f'*/}
+
+                                },
+                                subtitle: {
+                                    text: totalAccepted + ' of ' + totalEstimate + ' points',
+                                    x: -135, y: 235,
+                                    align: 'center',
+                                    style: {fontSize: '16px'}
+                                }
+
+                            }
+                        }]
+                    };
+
+                    return chart;
+                }
+            });
+
+            Rally.launchApp('AcceptanceDashboard', {
+                name: "Acceptance Dashboard"
+            });
+        });
+    </script>
+</head>
+<body>
+</body>
+</html>
+
+

@@ -1,0 +1,303 @@
+-<!DOCTYPE html>
+<html>
+<head>
+    <title>PVT Dashboard</title>
+<script type="text/javascript" src="https://rally1.rallydev.com/apps/2.1/sdk-debug.js"></script>
+<script type="text/javascript">
+    var pvtTags;
+        Rally.onReady(function() {
+            Ext.define("PVTDashboard", {
+                extend: "Rally.app.App",
+                componentCls: "app",
+                launch: function() {
+                    this.getPVTTags();
+                    var _this = this;
+                    var iterationCombobox = Ext.create("Rally.ui.combobox.IterationComboBox", {
+                        avoidUnscheduledIteration: !0,
+                        itemId: 'IterationComboBox',
+                        allQuery: 'Sprint',
+                        listeners: {
+                            select: function(combobox) {
+                                this.teams = {};
+                                this.panels = [];
+                                this.remove('Dashboard');
+                                this._filterStories(combobox);
+                            },
+                            ready: function(combobox) {
+                                this.teams = {};
+                                this.panels = [];
+                                this._filterStories(combobox);
+                           },
+                            scope: this
+                        }
+                    });
+                    this.addListener('displayDashboard', this.displayDashboard)
+                    this.add(iterationCombobox);
+                },
+                displayDashboard: function() {
+                    var _this= this;
+                    this.add(Ext.create('Ext.panel.Panel', {
+                        title: 'PVT Dashboard',
+                        itemId: 'Dashboard',
+                        defaults: {
+                            bodyStyle: 'padding:15px'
+                        },
+                        layout: {
+                            type: 'accordion',
+                            titleCollapse: false,
+                            animate: true
+                        },
+                        tbar: ['->', { 
+                                xtype: 'button',
+                                text: 'Notify...', 
+                                align: 'right',
+                                handler: function() {
+                                    var mailto = 'mailto:DSCustomerWebsite@barclaycardus.com?subject=PVT%20status&body=';
+                                    Ext.Array.each(_this.panels, function(panel){
+                                        mailto = mailto + panel.title + '%0D';
+                                    });
+                                    window.location = mailto;
+                                }
+                            }],
+                        items: this.panels
+                    }));
+                },
+                getPVTTags: function() {
+                    Ext.create('Rally.data.wsapi.Store', {
+                        model: 'Tag',
+                        autoLoad: true,
+                        listeners: {
+                            load: function(store, records) {
+                                var tags = [];
+                                records.map(function(record) {
+                                    var item = record.get('Name').toLowerCase();
+                                    if (item == 'pvt eligible' || item == 'pvt in progress' || item == 'pvt complete') {
+                                        var tag = {
+                                            'Name': record.get('Name'),
+                                            '_ref': record.get('_ref').toString(),
+                                            '_refObjectName': record.get('_refObjectName').toString()
+                                        };
+                                        tags.push(tag);
+                                    }
+                                });
+                                pvtTags = tags;
+                            }
+                        },
+                        fetch: ["Name"],
+                        filters: [{
+                            property: "Name",
+                            operator: "contains",
+                            value: "PVT"
+                        }]
+
+                    });
+                },
+                _filterStories: function(combobox) {
+                    var stories = [],
+                        _this = this;
+                    var iterationRef = combobox.getRecord().get("_ref");
+                    console.log(iterationRef)
+                    Ext.create('Rally.data.wsapi.artifact.Store', {
+                        models: ['UserStory', 'Defect'],
+                        autoLoad: true,
+                        context: {
+                            project: this.getContext().getProject()._ref,
+                            projectScopeDown: !0
+                        },
+                        listeners: {
+                            load: function(store, storyRecords) {
+                                var index = 0;
+                                for (var i = 0; i < storyRecords.length; i++) {
+                                    var story = storyRecords[i];
+                                    var tags = story.get('Tags')._tagsNameArray;
+                                    for (var j = 0; j < tags.length; j++) {
+                                        var tagName = tags[j].Name;
+                                        if (tagName.toLowerCase().match('pvt eligible')) {
+                                            stories.push(story);
+                                        }
+                                    }
+                                }
+                                for (i = 0; i < stories.length; i++) {
+                                    if (typeof stories[i + 1] == 'undefined' ||
+                                        stories[i].get('Project').Name !== stories[i + 1].get('Project').Name) {
+                                        _this.teams[stories[i].get('Project').Name] = 0;
+                                        _this._prepareDataForDisplay(stories.slice(index, i + 1), stories[i].get('Project').Name);
+                                        index = i + 1;
+                                    }
+                                    if (i == stories.length - 1) {
+                                        _this.fireEvent('displayDashboard')
+                                    }
+                                }
+                            }
+                        },
+                        fetch: ["Name", "Owner", "Project", "Tags", "FormattedID"],
+                        filters: [{
+                            property: "Iteration",
+                            operator: "=",
+                            value: iterationRef
+                        }],
+                        sorters: [{
+                            property: 'Project',
+                            direction: 'ASC'
+                        }]
+                    });
+                },
+                _prepareDataForDisplay: function(stories, teamName) {
+                    var _this = this;
+                    var formattedItemsList = [];
+                    var field;
+                    var fieldLabelList = [];
+                    var states = _this.getStates();
+                    for (var k = 0; k < stories.length; k++) {
+                        var story = stories[k];
+                        formattedItemsList.push({
+                            xtype: 'combobox',
+                            fieldLabel: story.get('FormattedID') + ': ' + story.get('Name'),
+                            labelWidth: 300,
+                            labelPad: 30,
+                            editable: false,
+                            margin: 10,
+                            displayField: 'name',
+                            valueField: 'id',
+                            data: {
+                                'FormattedID': story.get('FormattedID'),
+                                'Tags': story.get('Tags')._tagsNameArray,
+                                'story': story,
+                                'teamName': teamName
+                            },
+                            store: states,
+                            listeners: {
+                                change: _this._handleSelectEvent,
+                                scope: this,
+                                afterRender: _this._handleLoadEvent
+                            }
+                        });
+                    }
+                    this._displayPanel(formattedItemsList, teamName);
+                },
+                getStates: function() {
+                    return Ext.create('Ext.data.Store', {
+                        fields: ['id', 'name'],
+                        data: [{
+                                "id": "NS",
+                                "name": "Not Started"
+                            },
+                            {
+                                "id": "IP",
+                                "name": "In Progress"
+                            },
+                            {
+                                "id": "CO",
+                                "name": "Complete"
+                            }
+
+                        ]
+                    });
+                },
+                _handleLoadEvent: function(combo) {
+                    var tags = combo.data.Tags,
+                        _this = this;
+                    var pvtState = _this.teams[combo.data.teamName];
+                    if (typeof combo.getStore().lastOptions !== "undefined") {
+                        Ext.Array.each(tags, function(tag) {
+                            switch (tag.Name.toLowerCase()) {
+                                case 'pvt eligible':
+                                    combo.setValue(combo.getStore().data.items[0].get(combo.valueField));
+
+                                    break;
+                                case 'pvt in progress':
+                                    combo.setValue(combo.getStore().data.items[1].get(combo.valueField));
+
+                                    break;
+                                case 'pvt complete':
+                                    combo.setValue(combo.getStore().data.items[2].get(combo.valueField));
+                                    pvtState++
+                                    break;
+                                default:
+                                    combo.setValue(combo.getStore().first().get(combo.valueField));
+                            }
+                            _this.teams[combo.data.teamName] = pvtState;
+                            _this.fireEvent('updatePercentComplete', combo.data.teamName, combo.container.id);
+                        });
+
+
+                    }
+                },
+                _handleSelectEvent: function(e, newValue, oldValue) {
+                    if(oldValue){
+                    var selectedStory = e.data.story;
+                    var tag = selectedStory.get('Tags');
+                    var pvtState = this.teams[e.data.teamName];
+
+                    switch (e.value) {
+                        case 'NS':
+                            tag._tagsNameArray.pop();
+                            if (oldValue === 'CO') {
+                                pvtState--;
+                            }
+                            tag._tagsNameArray.push(pvtTags[0]);
+                            break;
+                        case 'IP':
+                            tag._tagsNameArray.pop();
+                            if (oldValue === 'CO') {
+                                pvtState--;
+                            }
+                            tag._tagsNameArray.push(pvtTags[1]);
+                            break;
+                        case 'CO':
+                            tag._tagsNameArray.pop();
+                            tag._tagsNameArray.push(pvtTags[2]);
+                            pvtState++
+                            break;
+                        default:
+                    }
+                    this.teams[e.data.teamName] = pvtState;
+                    this._updateTags(selectedStory, tag, e.data.teamName, e.container.id);
+                    }
+                },
+                _updateTags: function(selectedStory, tag, team, containerID) {
+                    var _this = this;
+                     Ext.Ajax.request({
+                            url: 'https://rally1.rallydev.com/slm/webservice/v2.0/hierarchicalrequirement/' + selectedStory.get('ObjectID'),
+                            method: 'POST',
+                            jsonData:  {
+                                "HierarchicalRequirement":{
+                                    "Tags": tag._tagsNameArray
+                                    }
+                            },
+                            success: function(response){
+                                _this.fireEvent('updatePercentComplete', team, containerID);
+                            }
+                        });
+                },
+                _displayPanel: function(stories, teamName) {
+                    var _this = this;
+                    var totalPVT = 0
+
+                    var panel = Ext.create('Ext.panel.Panel', {
+                        bodyPadding: 5,
+                        itemId: 'panel' + teamName,
+                        title: 'PVT Dashboard for ' + teamName,
+                        items: stories
+
+                    });
+                    panel.addManagedListener(this, 'updatePercentComplete', function(team, containerID) {
+                        var pvtComplete = Ext.util.Format.round(_this.teams[team] * 100 / stories.length, 2);
+                        if (containerID.toLowerCase().match(panel.id.toLowerCase())) {
+                            panel.setTitle('Team ' + teamName + ' - ' + pvtComplete + ' % PVT Completed')
+                        }
+
+                    })
+                    this.panels.push(panel);
+                }
+            });
+
+            Rally.launchApp('PVTDashboard', {
+                name: "PVT Dashboard"
+            });
+ });
+    </script>
+</head>
+<body>
+</body>
+</html>
